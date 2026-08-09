@@ -1,6 +1,6 @@
 {
   "name": "@cintelisai/brainstorm-mcp",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "MCP server for Brainstorm Board — connect Claude to your workspace with SSO device-flow sign-in, no API keys.",
   "type": "module",
   "main": "server.mjs",
