@@ -15,18 +15,18 @@ Add to `claude_desktop_config.json` (Settings → Developer → Edit Config), th
   "mcpServers": {
     "brainstorm": {
       "command": "npx",
-      "args": ["-y", "@cintelisai/brainstorm-mcp"]
+      "args": ["-y", "@cintelisai/brainstorm-mcp@latest"]
     }
   }
 }
 ```
 
-On Windows, if `npx` fails to launch, use `"command": "cmd", "args": ["/c", "npx", "-y", "@cintelisai/brainstorm-mcp"]`.
+On Windows, if `npx` fails to launch, use `"command": "cmd", "args": ["/c", "npx", "-y", "@cintelisai/brainstorm-mcp@latest"]`.
 
 ### Claude Code
 
 ```
-claude mcp add brainstorm -- npx -y @cintelisai/brainstorm-mcp
+claude mcp add brainstorm -- npx -y @cintelisai/brainstorm-mcp@latest
 ```
 
 ## Connecting
@@ -63,7 +63,7 @@ Set it in the MCP config entry to target another deployment:
 ```json
 "brainstorm": {
   "command": "npx",
-  "args": ["-y", "@cintelisai/brainstorm-mcp"],
+  "args": ["-y", "@cintelisai/brainstorm-mcp@latest"],
   "env": { "BRAINSTORM_URL": "https://your-instance.example.com" }
 }
 ```
