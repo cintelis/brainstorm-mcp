@@ -1,6 +1,6 @@
 # Brainstorm Board MCP server
 
-Connects Claude (Desktop, Code, or any MCP client) to a [Brainstorm Board](https://github.com/cintelis/brainstorm-board) workspace through its versioned machine API (`/api/v1`).
+Connects Claude (Desktop, Code, or any MCP client) to a [Brainstorm Board](https://brainstorm.cintelis.ai) workspace through its versioned machine API (`/api/v1`).
 
 **Sign-in is SSO, not keys.** The first tool call starts an OAuth device flow (RFC 8628): Claude shows you a URL and a short code, you approve in a browser where you are already signed in, and a workspace-scoped token is delivered back automatically. Nothing is typed, pasted, or stored in any config file.
 

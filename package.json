@@ -15,6 +15,7 @@
   },
   "license": "MIT",
   "author": "Cintelis Pty Limited",
+  "homepage": "https://brainstorm.cintelis.ai",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/cintelis/brainstorm-mcp.git"
