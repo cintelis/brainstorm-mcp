@@ -46,7 +46,7 @@ In any chat: *"connect to brainstorm"*. Claude will call `brainstorm_connect` an
 | `brainstorm_status` | Show connection state and workspace |
 | `brainstorm_list_notes` | List notes and folders (titles and ids, not content) |
 | `brainstorm_read_note` | Read one note's full markdown content by id |
-| `brainstorm_read_asset` | Fetch an attachment by name — images display inline, text formats as text |
+| `brainstorm_read_asset` | Fetch an attachment by name — images display inline; `.docx`, spreadsheets and PDFs convert to text; text formats pass through |
 | `brainstorm_create_note` | Create a markdown note; `folder` is a folder *name*, created if new |
 | `brainstorm_disconnect` | Delete the stored token from this machine |
 

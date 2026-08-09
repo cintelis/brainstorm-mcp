@@ -283,7 +283,7 @@ const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
 
 server.tool(
   "brainstorm_read_asset",
-  "Fetch an attachment (image, document, diagram) from the workspace by its asset name, e.g. from a note's assets/<name> link. Images are returned for viewing; text formats as text; other binaries are described.",
+  "Fetch an attachment (image, document, diagram) from the workspace by its asset name, e.g. from a note's assets/<name> link. Images are returned for viewing; Word documents (.docx), spreadsheets (.xlsx/.xls/.ods) and PDFs are converted to text; text formats pass through; other binaries are described.",
   {
     name: z.string().describe("The asset filename, without the assets/ prefix."),
   },
@@ -315,13 +315,96 @@ server.tool(
         content: [{ type: "image", data: buf.toString("base64"), mimeType: type }],
       };
     }
+    // Office formats are extracted here, in the client, mirroring what the
+    // app itself does at preview time (its lib/office-doc.ts): the server
+    // stores only the original bytes, and conversion happens wherever the
+    // reader is. mammoth walks the OOXML for prose; SheetJS reads workbooks —
+    // installed from the vendor's CDN tarball, not npm, whose newest published
+    // build carries prototype-pollution and ReDoS advisories that matter
+    // precisely because this input is an untrusted upload.
+    //
+    // These branches run BEFORE the plain-text check, and the text check must
+    // never use a bare /xml/ match: a .docx announces itself as
+    // application/vnd.openXMLformats-…, which contains "xml", and the first
+    // cut of this code duly printed a Word document as raw ZIP bytes.
+    if (/\.docx$/i.test(name) || type.includes("wordprocessingml.document")) {
+      const mod = await import("mammoth");
+      const mammoth = mod.default ?? mod;
+      try {
+        const { value } = await mammoth.extractRawText({ buffer: buf });
+        return text(
+          value.trim()
+            ? `Text extracted from "${name}" (formatting not preserved):\n\n${clip(value)}`
+            : `"${name}" contains no extractable text.`
+        );
+      } catch (err) {
+        return text(
+          `Could not read "${name}" as a Word document: ${err instanceof Error ? err.message : String(err)}`,
+          true
+        );
+      }
+    }
+
+    if (
+      /\.(xlsx|xlsm|xls|ods)$/i.test(name) ||
+      type.includes("spreadsheetml") ||
+      type.includes("ms-excel")
+    ) {
+      const mod = await import("xlsx");
+      const XLSX = mod.default ?? mod;
+      try {
+        const wb = XLSX.read(buf, { type: "buffer" });
+        const MAX_SHEETS = 12;
+        const shown = wb.SheetNames.slice(0, MAX_SHEETS);
+        const parts = shown.map((sheetName) => {
+          const csv = XLSX.utils.sheet_to_csv(wb.Sheets[sheetName]).trim();
+          return `## Sheet: ${sheetName}\n${csv || "(empty)"}`;
+        });
+        const omitted = wb.SheetNames.length - shown.length;
+        if (omitted > 0) {
+          parts.push(`[${omitted} more sheet(s) omitted: ${wb.SheetNames.slice(MAX_SHEETS).join(", ")}]`);
+        }
+        return text(`Workbook "${name}" as CSV:\n\n${clip(parts.join("\n\n"))}`);
+      } catch (err) {
+        return text(
+          `Could not read "${name}" as a spreadsheet: ${err instanceof Error ? err.message : String(err)}`,
+          true
+        );
+      }
+    }
+
+    if (/\.pdf$/i.test(name) || type === "application/pdf") {
+      try {
+        const { extractText, getDocumentProxy } = await import("unpdf");
+        const pdf = await getDocumentProxy(new Uint8Array(buf));
+        const { text: extracted, totalPages } = await extractText(pdf, { mergePages: true });
+        return text(
+          extracted.trim()
+            ? `Text extracted from "${name}" (${totalPages} page(s), layout not preserved):\n\n${clip(extracted)}`
+            : `"${name}" has ${totalPages} page(s) but no text layer — likely a scan. There is nothing to extract without OCR.`
+        );
+      } catch (err) {
+        return text(
+          `Could not read "${name}" as a PDF: ${err instanceof Error ? err.message : String(err)}`,
+          true
+        );
+      }
+    }
+
     const isTextual =
       type.startsWith("text/") ||
-      /(json|xml|csv|svg|markdown|javascript)/.test(type) ||
+      type === "application/json" ||
+      type === "application/xml" ||
+      type.endsWith("+json") ||
+      type.endsWith("+xml") ||
+      /(csv|markdown|javascript)/.test(type) ||
       /\.(md|txt|json|csv|xml|drawio|svg)$/i.test(name);
     if (isTextual) {
       return text(clip(buf.toString("utf8")));
     }
+
+    // Word 97 .doc, .rtf and .odt are stored and served but not convertible —
+    // the same honest refusal the app's preview makes.
     return text(
       `"${name}" is ${type || "an unknown type"}, ${(buf.length / 1024).toFixed(0)} kB — a binary format that cannot be displayed in chat. It can be downloaded in the app from the note that references it.`
     );
