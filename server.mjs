@@ -21,7 +21,7 @@
 // uploads one and links it into a note, which is the same markdown GitHub
 // renders. One engine, in one place, rather than a second copy in JavaScript.
 
-import { existsSync, readFileSync, writeFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { basename, isAbsolute, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -82,7 +82,9 @@ async function tokenStillValid() {
   try {
     const { res } = await api("/api/v1/notes");
     if (res.status === 401) {
-      rmSync(CACHE_PATH, { force: true });
+      // An empty file, not a deleted one: a missing file is what triggers the
+      // carry-over from the old package, which would bring the dead token back.
+      saveCache({});
       return false;
     }
     return true;
@@ -260,7 +262,9 @@ server.tool(
   "Forget the stored GuardStein API token for this machine. (The token itself can also be revoked in the app under Account.)",
   {},
   async () => {
-    rmSync(CACHE_PATH, { force: true });
+    // Emptied rather than deleted, so the next start does not carry a token
+    // over from the old brainstorm-mcp files and reconnect behind the user's back.
+    saveCache({});
     return text("Disconnected: the stored token was deleted from this machine.");
   }
 );
