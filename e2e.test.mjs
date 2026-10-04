@@ -142,5 +142,12 @@ test("a revoked token is dropped, so connect can start a fresh sign-in", async (
   writeFileSync(cacheFile, JSON.stringify({ token: "revoked_token", workspaceId: "ws_1" }));
   const r = await call("guardstein_status");
   assert.match(r.text, /revoked or has expired/);
-  assert.ok(!existsSync(cacheFile));
+  assert.deepEqual(JSON.parse(readFileSync(cacheFile, "utf8")), {});
+});
+
+test("disconnect stays disconnected: the old package's token is not carried over again", async () => {
+  // The legacy file from before() still holds a VALID token.
+  await call("guardstein_disconnect");
+  const r = await call("guardstein_status");
+  assert.match(r.text, /^Not connected/);
 });
