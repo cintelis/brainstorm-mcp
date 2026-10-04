@@ -1,21 +1,25 @@
 {
-  "name": "@cintelisai/brainstorm-mcp",
-  "version": "0.3.1",
-  "description": "MCP server for Brainstorm Board — connect Claude to your workspace with SSO device-flow sign-in, no API keys.",
+  "name": "@cintelisai/guardstein-mcp",
+  "version": "0.4.0",
+  "description": "MCP server for GuardStein (formerly Brainstorm Board): connect Claude to your workspace with SSO device-flow sign-in, no API keys. Read and write notes, upload files, and add editable draw.io diagrams.",
   "type": "module",
   "main": "server.mjs",
   "bin": {
-    "brainstorm-mcp": "server.mjs"
+    "guardstein-mcp": "server.mjs"
   },
   "files": [
-    "server.mjs"
+    "server.mjs",
+    "lib.mjs"
   ],
+  "scripts": {
+    "test": "node --test"
+  },
   "engines": {
     "node": ">=18.17"
   },
   "license": "MIT",
   "author": "Cintelis Pty Limited",
-  "homepage": "https://brainstorm.cintelis.ai",
+  "homepage": "https://guardstein.com",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/cintelis/brainstorm-mcp.git"
@@ -24,8 +28,10 @@
     "mcp",
     "modelcontextprotocol",
     "claude",
-    "brainstorm-board",
+    "guardstein",
     "notes",
+    "drawio",
+    "diagrams",
     "device-flow"
   ],
   "publishConfig": {

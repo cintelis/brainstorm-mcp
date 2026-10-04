@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// MCP server for the Brainstorm Board cloud API.
+// MCP server for the GuardStein cloud API (formerly GuardStein).
 //
 // Bridges Claude (Desktop, Code, or any MCP client) to /api/v1 on a deployed
 // instance. Authentication is the OAuth device flow the app already ships
@@ -15,38 +15,80 @@
 // Deliberately dependency-light: the MCP SDK, zod (its schema language), and
 // global fetch. State is one JSON file in the user's home directory holding
 // the base URL, the token, and — briefly — a pending device authorization.
+//
+// Diagrams are not drawn here. The drawgen MCP server (drawio-tools) writes
+// editable .drawio.svg files on the user's machine; guardstein_add_diagram
+// uploads one and links it into a note, which is the same markdown GitHub
+// renders. One engine, in one place, rather than a second copy in JavaScript.
 
-import { readFileSync, writeFileSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { existsSync, readFileSync, writeFileSync, rmSync, statSync } from "node:fs";
+import { basename, isAbsolute, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import {
+  MAX_UPLOAD_BYTES,
+  cachePath,
+  insertDiagram,
+  isEditableDrawioPng,
+  isEditableDrawioSvg,
+  legacyCachePaths,
+  resolveBaseUrl,
+} from "./lib.mjs";
 
-const BASE_URL = (process.env.BRAINSTORM_URL ?? "https://brainstorm.cintelis.ai").replace(
-  /\/+$/,
-  ""
-);
+const VERSION = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
+
+const BASE_URL = resolveBaseUrl();
 
 /**
- * One cache file per host, so pointing BRAINSTORM_URL at a preview or
+ * One cache file per host, so pointing GUARDSTEIN_URL at a preview or
  * localhost cannot silently reuse (or clobber) the production token.
  */
-const CACHE_PATH = join(
-  homedir(),
-  `.brainstorm-mcp-${BASE_URL.replace(/[^a-z0-9]+/gi, "_")}.json`
-);
+const CACHE_PATH = cachePath(BASE_URL);
 
 function loadCache() {
   try {
     return JSON.parse(readFileSync(CACHE_PATH, "utf8"));
   } catch {
+    // First run of the renamed package: carry over a token the old
+    // brainstorm-mcp stored, so existing users are not asked to sign in again.
+    for (const legacy of legacyCachePaths(BASE_URL)) {
+      try {
+        const old = JSON.parse(readFileSync(legacy, "utf8"));
+        if (old.token) {
+          const migrated = { token: old.token, workspaceId: old.workspaceId, migratedFrom: legacy };
+          saveCache(migrated);
+          return migrated;
+        }
+      } catch {
+        // Not there, or unreadable: try the next one.
+      }
+    }
     return {};
   }
 }
 
 function saveCache(cache) {
   writeFileSync(CACHE_PATH, JSON.stringify(cache, null, 2), { mode: 0o600 });
+}
+
+/**
+ * Whether the stored token still works, dropping it if the server says it was
+ * revoked or expired. Without this a revoked token reads as "connected" and
+ * connect refuses to start a new sign-in until the user thinks to disconnect.
+ * A network failure keeps the token: being offline is not being signed out.
+ */
+async function tokenStillValid() {
+  try {
+    const { res } = await api("/api/v1/notes");
+    if (res.status === 401) {
+      rmSync(CACHE_PATH, { force: true });
+      return false;
+    }
+    return true;
+  } catch {
+    return true;
+  }
 }
 
 /** Every tool answers in plain text; MCP clients render it as-is. */
@@ -98,37 +140,40 @@ function clip(textValue) {
     : textValue;
 }
 
-const server = new McpServer({ name: "brainstorm-board", version: "0.1.0" });
+const server = new McpServer({ name: "guardstein", version: VERSION });
 
 server.tool(
-  "brainstorm_status",
-  "Show whether this server is connected to Brainstorm Board, and to which workspace.",
+  "guardstein_status",
+  "Show whether this server is connected to GuardStein, and to which workspace.",
   {},
   async () => {
     const cache = loadCache();
     if (cache.token) {
+      if (!(await tokenStillValid())) {
+        return text(`Not connected to ${BASE_URL}: the stored token was revoked or has expired, so it was removed. Call guardstein_connect to sign in again.`);
+      }
       return text(
-        `Connected to ${BASE_URL} (workspace ${cache.workspaceId ?? "unknown"}). Use brainstorm_list_notes or brainstorm_create_note.`
+        `Connected to ${BASE_URL} (workspace ${cache.workspaceId ?? "unknown"}). Use guardstein_list_notes or guardstein_create_note.`
       );
     }
     if (cache.pending) {
       return text(
-        `A connection is awaiting approval at ${cache.pending.verificationUri} with code ${cache.pending.userCode}. Approve it in the browser, then call brainstorm_finish_connect.`
+        `A connection is awaiting approval at ${cache.pending.verificationUri} with code ${cache.pending.userCode}. Approve it in the browser, then call guardstein_finish_connect.`
       );
     }
-    return text(`Not connected to ${BASE_URL}. Call brainstorm_connect to start.`);
+    return text(`Not connected to ${BASE_URL}. Call guardstein_connect to start.`);
   }
 );
 
 server.tool(
-  "brainstorm_connect",
-  "Start an SSO connection to Brainstorm Board (OAuth device flow). Returns a URL and a code for the user to approve in their browser; afterwards call brainstorm_finish_connect.",
+  "guardstein_connect",
+  "Start an SSO connection to GuardStein (OAuth device flow). Returns a URL and a code for the user to approve in their browser; afterwards call guardstein_finish_connect.",
   {},
   async () => {
     const cache = loadCache();
-    if (cache.token) {
+    if (cache.token && (await tokenStillValid())) {
       return text(
-        `Already connected to ${BASE_URL} (workspace ${cache.workspaceId ?? "unknown"}). Call brainstorm_disconnect first to connect as a different workspace.`
+        `Already connected to ${BASE_URL} (workspace ${cache.workspaceId ?? "unknown"}). Call guardstein_disconnect first to connect as a different workspace.`
       );
     }
     const { res, body } = await api("/api/v1/device/code", {
@@ -154,29 +199,29 @@ server.tool(
       [
         `To connect, the user must approve this device in their browser:`,
         ``,
-        `  1. IMPORTANT: in the Brainstorm app, switch to the workspace this connection should access (the token is bound to whichever workspace is active when approving).`,
+        `  1. IMPORTANT: in the GuardStein app, switch to the workspace this connection should access (the token is bound to whichever workspace is active when approving).`,
         `  2. Open: ${body.verification_uri_complete ?? body.verification_uri}`,
         `  3. Check the code on the page matches: ${body.user_code}`,
         `  4. Approve. (Requires a workspace admin on a Premium workspace.)`,
         ``,
-        `The code expires in ${Math.round((body.expires_in ?? 600) / 60)} minutes. Once approved, call brainstorm_finish_connect.`,
+        `The code expires in ${Math.round((body.expires_in ?? 600) / 60)} minutes. Once approved, call guardstein_finish_connect.`,
       ].join("\n")
     );
   }
 );
 
 server.tool(
-  "brainstorm_finish_connect",
+  "guardstein_finish_connect",
   "Complete a pending SSO connection after the user has approved it in the browser.",
   {},
   async () => {
     const cache = loadCache();
     const pending = cache.pending;
     if (cache.token) return text(`Already connected to ${BASE_URL}.`);
-    if (!pending) return text("No pending connection. Call brainstorm_connect first.", true);
+    if (!pending) return text("No pending connection. Call guardstein_connect first.", true);
     if (pending.expiresAt < Date.now()) {
       saveCache({});
-      return text("The device code expired. Call brainstorm_connect to start again.", true);
+      return text("The device code expired. Call guardstein_connect to start again.", true);
     }
 
     // A few polls at the server-mandated interval, so one tool call usually
@@ -200,19 +245,19 @@ server.tool(
       if (code === "authorization_pending" || code === "slow_down") continue;
       saveCache({});
       return text(
-        `The connection was not completed (${code}): ${body?.error_description ?? ""}. Call brainstorm_connect to start again.`,
+        `The connection was not completed (${code}): ${body?.error_description ?? ""}. Call guardstein_connect to start again.`,
         true
       );
     }
     return text(
-      `Still waiting for approval at ${pending.verificationUri} (code ${pending.userCode}). Approve it in the browser, then call brainstorm_finish_connect again.`
+      `Still waiting for approval at ${pending.verificationUri} (code ${pending.userCode}). Approve it in the browser, then call guardstein_finish_connect again.`
     );
   }
 );
 
 server.tool(
-  "brainstorm_disconnect",
-  "Forget the stored Brainstorm Board API token for this machine. (The token itself can also be revoked in the app under Account.)",
+  "guardstein_disconnect",
+  "Forget the stored GuardStein API token for this machine. (The token itself can also be revoked in the app under Account.)",
   {},
   async () => {
     rmSync(CACHE_PATH, { force: true });
@@ -221,13 +266,13 @@ server.tool(
 );
 
 server.tool(
-  "brainstorm_list_notes",
-  "List the notes and folders in the connected Brainstorm Board workspace (titles and ids only, not content).",
+  "guardstein_list_notes",
+  "List the notes and folders in the connected GuardStein workspace (titles and ids only, not content).",
   {},
   async () => {
     const { res, body } = await api("/api/v1/notes");
     if (res.status === 401) {
-      return text("Not connected (or the token was revoked). Call brainstorm_connect.", true);
+      return text("Not connected (or the token was revoked). Call guardstein_connect.", true);
     }
     if (!res.ok) {
       return text(`API error (HTTP ${res.status}): ${body?.message ?? body?.error ?? "no detail"}`, true);
@@ -243,15 +288,15 @@ server.tool(
 );
 
 server.tool(
-  "brainstorm_read_note",
-  "Read one note's full markdown content by id (get ids from brainstorm_list_notes). Also reports any assets/<name> attachments referenced, readable with brainstorm_read_asset.",
+  "guardstein_read_note",
+  "Read one note's full markdown content by id (get ids from guardstein_list_notes). Also reports any assets/<name> attachments referenced, readable with guardstein_read_asset.",
   {
-    id: z.string().describe("The note id, from brainstorm_list_notes."),
+    id: z.string().describe("The note id, from guardstein_list_notes."),
   },
   async ({ id }) => {
     const { res, body } = await api(`/api/v1/notes/${encodeURIComponent(id)}`);
     if (res.status === 401) {
-      return text("Not connected (or the token was revoked). Call brainstorm_connect.", true);
+      return text("Not connected (or the token was revoked). Call guardstein_connect.", true);
     }
     if (res.status === 404 && body?.error === "not_found") {
       return text(`No note with id ${id} in this workspace.`, true);
@@ -265,7 +310,7 @@ server.tool(
     const assets = [...new Set(body.content.match(/assets\/[A-Za-z0-9._-]+/g) ?? [])];
     const header = [
       `# ${body.title}`,
-      `id: ${body.id} · updated ${new Date(body.updatedAt).toISOString()}`,
+      `id: ${body.id} · updated ${new Date(body.updatedAt).toISOString()} · version ${body.updatedAt}`,
       assets.length
         ? `attachments: ${assets.map((a) => a.replace(/^assets\//, "")).join(", ")}`
         : null,
@@ -282,7 +327,7 @@ const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp
 const MAX_IMAGE_BYTES = 3 * 1024 * 1024;
 
 server.tool(
-  "brainstorm_read_asset",
+  "guardstein_read_asset",
   "Fetch an attachment (image, document, diagram) from the workspace by its asset name, e.g. from a note's assets/<name> link. Images are returned for viewing; Word documents (.docx), spreadsheets (.xlsx/.xls/.ods) and PDFs are converted to text; text formats pass through; other binaries are described.",
   {
     name: z.string().describe("The asset filename, without the assets/ prefix."),
@@ -292,7 +337,7 @@ server.tool(
       `/api/v1/assets/${encodeURIComponent(name.replace(/^assets\//, ""))}`
     );
     if (res.status === 401) {
-      return text("Not connected (or the token was revoked). Call brainstorm_connect.", true);
+      return text("Not connected (or the token was revoked). Call guardstein_connect.", true);
     }
     if (!res.ok) {
       let detail = "";
@@ -412,8 +457,8 @@ server.tool(
 );
 
 server.tool(
-  "brainstorm_create_note",
-  "Create a markdown note in the connected Brainstorm Board workspace. `folder` is a folder NAME (created if it does not exist yet); omit it to leave the note unfiled.",
+  "guardstein_create_note",
+  "Create a markdown note in the connected GuardStein workspace. `folder` is a folder NAME (created if it does not exist yet); omit it to leave the note unfiled.",
   {
     content: z.string().describe("The note body, markdown. The first line becomes the title if none is given."),
     title: z.string().optional().describe("Optional explicit title."),
@@ -425,7 +470,7 @@ server.tool(
       body: JSON.stringify({ content, title, folder }),
     });
     if (res.status === 401) {
-      return text("Not connected (or the token was revoked). Call brainstorm_connect.", true);
+      return text("Not connected (or the token was revoked). Call guardstein_connect.", true);
     }
     if (!res.ok) {
       return text(`Could not create the note (HTTP ${res.status}): ${body?.message ?? body?.error ?? "no detail"}`, true);
@@ -433,6 +478,187 @@ server.tool(
     return text(
       `Created "${body.title}" (id ${body.id}${body.filename ? `, file ${body.filename}` : ""}). Open it at ${BASE_URL}${body.url}`
     );
+  }
+);
+
+// ───────────────────────────────────────────────────── writing files and notes
+
+/**
+ * Local paths resolve against GUARDSTEIN_WORKDIR, else the process directory.
+ * Claude Code starts servers in the project; Claude Desktop starts them in an
+ * arbitrary directory, so Desktop users either pass absolute paths or set it.
+ */
+function localPath(p) {
+  const expanded = p.replace(/^~(?=$|[\\/])/, process.env.HOME ?? process.env.USERPROFILE ?? "~");
+  return isAbsolute(expanded)
+    ? expanded
+    : resolve(process.env.GUARDSTEIN_WORKDIR || process.cwd(), expanded);
+}
+
+/** Upload a local file as an asset. Returns the API body ({path, name, markdown}) or throws. */
+async function uploadFile(path) {
+  const full = localPath(path);
+  if (!existsSync(full)) throw new Error(`No file at ${full}.`);
+  const size = statSync(full).size;
+  if (size > MAX_UPLOAD_BYTES) {
+    throw new Error(
+      `${basename(full)} is ${(size / 1024 / 1024).toFixed(1)} MB; uploads over the API are limited to 4.5 MB. Attach it in the app instead.`
+    );
+  }
+  const cache = loadCache();
+  const res = await fetch(`${BASE_URL}/api/v1/assets`, {
+    method: "POST",
+    headers: {
+      ...(cache.token ? { Authorization: `Bearer ${cache.token}` } : {}),
+      "Content-Type": "application/octet-stream",
+      "x-filename": encodeURIComponent(basename(full)),
+    },
+    body: readFileSync(full),
+    signal: AbortSignal.timeout(60_000),
+  });
+  let body = null;
+  try {
+    body = await res.json();
+  } catch {
+    // Platform errors (413 from the edge, 5xx) are not JSON.
+  }
+  if (res.status === 401) throw new Error("Not connected (or the token was revoked). Call guardstein_connect.");
+  if (!res.ok) throw new Error(`Upload failed (HTTP ${res.status}): ${body?.message ?? body?.error ?? "no detail"}`);
+  return body;
+}
+
+/** PATCH a note. Returns {res, body} so callers can tell a 409 from a failure. */
+function patchNote(id, payload) {
+  return api(`/api/v1/notes/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+function patchError(res, body) {
+  if (res.status === 401) return "Not connected (or the token was revoked). Call guardstein_connect.";
+  if (res.status === 405 || (res.status === 404 && body?.error !== "not_found")) {
+    return `This GuardStein instance does not support updating notes over the API yet (HTTP ${res.status}).`;
+  }
+  return `Could not update the note (HTTP ${res.status}): ${body?.message ?? body?.error ?? "no detail"}`;
+}
+
+server.tool(
+  "guardstein_upload_asset",
+  "Upload a local file (image, PDF, document, diagram) to the workspace's assets and get the markdown to reference it from a note, e.g. ![x](assets/1a2b3c4d-x.png). Files over 4.5 MB must be attached in the app. For a draw.io diagram use guardstein_add_diagram, which also links it into a note.",
+  {
+    path: z.string().describe("Path to the local file. Absolute, or relative to GUARDSTEIN_WORKDIR / the working directory."),
+  },
+  async ({ path }) => {
+    try {
+      const body = await uploadFile(path);
+      return text(`Uploaded as ${body.path} (${(body.bytes / 1024).toFixed(0)} kB). Markdown:\n\n${body.markdown}`);
+    } catch (err) {
+      return text(err instanceof Error ? err.message : String(err), true);
+    }
+  }
+);
+
+server.tool(
+  "guardstein_update_note",
+  "Replace a note's content and/or title. Pass expected_version: the version guardstein_read_note reported. If someone edited the note since, the update is refused; read it again, re-apply your change to the current text, and retry. Only pass force: true when the user has said to overwrite their changes.",
+  {
+    id: z.string().describe("The note id."),
+    content: z.string().optional().describe("The complete new markdown body (not a diff)."),
+    title: z.string().optional().describe("New title. Omit to keep the title in step with the first line."),
+    expected_version: z.number().optional().describe("The `version` from guardstein_read_note."),
+    force: z.boolean().optional().describe("Overwrite even if the note changed since it was read."),
+  },
+  async ({ id, content, title, expected_version, force }) => {
+    if (content === undefined && title === undefined) return text("Pass content, title, or both.", true);
+    if (expected_version === undefined && !force) {
+      return text("Pass expected_version (from guardstein_read_note), so a newer edit is not overwritten.", true);
+    }
+    const { res, body } = await patchNote(id, {
+      ...(content !== undefined ? { content } : {}),
+      ...(title !== undefined ? { title } : {}),
+      ...(force ? { force: true } : { expectedUpdatedAt: expected_version }),
+    });
+    if (res.status === 409) {
+      return text(
+        `Not updated: the note changed after you read it (now version ${body?.updatedAt}${body?.updatedBy ? `, by ${body.updatedBy}` : ""}). Read it again with guardstein_read_note, apply your change to the current content, and retry with the new version.`,
+        true
+      );
+    }
+    if (!res.ok) return text(patchError(res, body), true);
+    return text(`Updated "${body.title}" (version ${body.updatedAt}). Open it at ${BASE_URL}${body.url}`);
+  }
+);
+
+server.tool(
+  "guardstein_add_diagram",
+  "Put an editable draw.io diagram into a note. Takes a local NAME.drawio.svg (or .drawio.png) such as the drawgen MCP's create_diagram writes, uploads it, and links it as ![alt](assets/...), which GitHub also renders. With note_id it goes into that note (under after_heading, in place of replace_link, or at the end); without, a new note is created. Re-run with replace_link to swap in an edited version.",
+  {
+    path: z.string().describe("Local .drawio.svg or .drawio.png with the diagram embedded."),
+    alt: z.string().optional().describe("Alt text / caption, e.g. 'Order flow'. Defaults to the file name."),
+    note_id: z.string().optional().describe("Note to add it to. Omit to create a new note."),
+    after_heading: z.string().optional().describe("Insert under the first heading with this text (without #)."),
+    replace_link: z.string().optional().describe("An existing assets/... image link in the note to replace."),
+    title: z.string().optional().describe("Title for a NEW note (only when note_id is omitted)."),
+    folder: z.string().optional().describe("Folder name for a NEW note."),
+  },
+  async ({ path, alt, note_id, after_heading, replace_link, title, folder }) => {
+    try {
+      const full = localPath(path);
+      if (!existsSync(full)) return text(`No file at ${full}.`, true);
+      const buf = readFileSync(full);
+      const editable = /\.svg$/i.test(full)
+        ? isEditableDrawioSvg(buf.toString("utf8"))
+        : /\.png$/i.test(full) && isEditableDrawioPng(buf);
+      if (!editable) {
+        return text(
+          `${basename(full)} has no embedded draw.io diagram, so it would not be editable. Export it from draw.io with "Include a copy of my diagram", or write it with the drawgen MCP's create_diagram.`,
+          true
+        );
+      }
+      if (!/\.drawio\.(svg|png)$/i.test(full)) {
+        return text(
+          `Name the file NAME.drawio.svg (or .drawio.png): that suffix is how GitHub, draw.io's VS Code extension and GuardStein know the picture is also a diagram.`,
+          true
+        );
+      }
+
+      const uploaded = await uploadFile(full);
+      const label = (alt ?? basename(full).replace(/\.drawio\.(svg|png)$/i, "")).replace(/[[\]]/g, "");
+      const markdown = `![${label}](${uploaded.path})`;
+
+      if (!note_id) {
+        const content = `# ${title ?? label}\n\n${markdown}\n`;
+        const { res, body } = await api("/api/v1/notes", {
+          method: "POST",
+          body: JSON.stringify({ content, title, folder }),
+        });
+        if (!res.ok) {
+          return text(`Uploaded ${uploaded.path}, but the note was not created (HTTP ${res.status}): ${body?.message ?? body?.error ?? "no detail"}`, true);
+        }
+        return text(`Created "${body.title}" with the diagram (${uploaded.path}). Open it at ${BASE_URL}${body.url}`);
+      }
+
+      // Read, insert, write with the version that was read. Inserting a link is
+      // a pure function of the current text, so a conflict is safe to retry
+      // once on the fresh copy, unlike a free-form edit.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const { res: r, body: note } = await api(`/api/v1/notes/${encodeURIComponent(note_id)}`);
+        if (!r.ok) {
+          return text(`Uploaded ${uploaded.path}, but could not read note ${note_id} (HTTP ${r.status}): ${note?.message ?? note?.error ?? "no detail"}`, true);
+        }
+        const content = insertDiagram(note.content, markdown, { afterHeading: after_heading, replaceLink: replace_link });
+        const { res, body } = await patchNote(note_id, { content, expectedUpdatedAt: note.updatedAt });
+        if (res.status === 409 && attempt === 0) continue;
+        if (!res.ok) return text(`Uploaded ${uploaded.path}, but ${patchError(res, body).replace(/^Could not/, "could not")}`, true);
+        return text(
+          `${replace_link ? "Replaced" : "Added"} the diagram in "${body.title}" (${uploaded.path}).${replace_link ? " The previous file stays stored, in case another note links it." : ""} Open it at ${BASE_URL}${body.url}`
+        );
+      }
+      return text("The note kept changing while the diagram was being added. Try again in a moment.", true);
+    } catch (err) {
+      return text(err instanceof Error ? err.message : String(err), true);
+    }
   }
 );
 
